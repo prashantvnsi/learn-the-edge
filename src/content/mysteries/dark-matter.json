@@ -1,0 +1,23 @@
+{
+    "id": "dark-matter",
+    "title": "Dark Matter: The Invisible Sculptor of Galaxies",
+    "subtitle": "We can map its gravity across the cosmos — but still don’t know what it is.",
+    "readingMinutes": 7,
+    "sections": [
+        {
+            "heading": "The clue that won’t go away",
+            "paragraphs": [
+                "Dark matter shows up as gravity..."
+            ]
+        }
+    ],
+    "keyTakeaways": [
+        "It’s inferred from gravity, not light."
+    ],
+    "sources": [
+        {
+            "label": "NASA: Dark Matter",
+            "url": "https://science.nasa.gov/universe/dark-matter-dark-energy/dark-matter/"
+        }
+    ]
+}
