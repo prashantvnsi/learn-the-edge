@@ -67,6 +67,7 @@ Topic:
 - title: ${topic.title}
 - hook: ${topic.hook}
 - category: ${topic.category}
+- difficulty (1-5): ${topic.difficulty ?? 3}
 
 What we know:
 ${(topic.known ?? []).map((x) => `- ${x}`).join("\n")}
