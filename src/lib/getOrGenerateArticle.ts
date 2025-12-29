@@ -96,6 +96,7 @@ Return JSON with this shape:
 Constraints:
 - 4 to 7 sections, each section 2-4 paragraphs.
 - Keep it exciting, but avoid fake certainty.
+- paragraphs array must never be empty.
 - Sources must be real-looking reputable orgs/journals (NASA/ESA, Nature/Science, university pages, etc.)
 - Output MUST be valid JSON.
 `.trim();
@@ -119,7 +120,48 @@ Constraints:
         throw new Error("Model did not return valid JSON");
     }
 
-    const article = ArticleSchema.parse(parsed);
+    const obj = parsed as any;
+
+    const sections = Array.isArray(obj?.sections) ? obj.sections : [];
+    const cleanedSections = sections
+        .map((s: any) => ({
+            heading: String(s?.heading ?? "").trim() || "Untitled section",
+            paragraphs: Array.isArray(s?.paragraphs)
+                ? s.paragraphs.map((p: any) => String(p ?? "").trim()).filter(Boolean)
+                : [],
+        }))
+        // remove sections that ended up with zero paragraphs
+        .filter((s: any) => s.paragraphs.length >= 1);
+
+    // If everything got filtered out, fail with a clear error so we can retry
+    if (cleanedSections.length === 0) {
+        throw new Error("MODEL_SECTIONS_EMPTY");
+    }
+
+    const merged = {
+        id: String(obj?.id ?? topic.id),
+        title: String(obj?.title ?? topic.title),
+        subtitle: String(obj?.subtitle ?? ""),
+        readingMinutes: Number(obj?.readingMinutes ?? 8),
+        hero: {
+            unsplashQuery: String(obj?.hero?.unsplashQuery ?? topic.title),
+            alt: String(obj?.hero?.alt ?? topic.title),
+        },
+        sections: cleanedSections,
+        keyTakeaways: Array.isArray(obj?.keyTakeaways)
+            ? obj.keyTakeaways.map((x: any) => String(x ?? "").trim()).filter(Boolean)
+            : [],
+        sources: Array.isArray(obj?.sources)
+            ? obj.sources
+                .map((s: any) => ({
+                    label: String(s?.label ?? "").trim(),
+                    url: String(s?.url ?? "").trim(),
+                }))
+                .filter((s: any) => s.label && s.url)
+            : [],
+    };
+
+    const article = ArticleSchema.parse(merged);
 
     // 4) Cache forever (no TTL)
     await redis.set(cacheKey(id), article);
