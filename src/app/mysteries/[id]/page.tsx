@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { getOrGenerateArticle } from "@/lib/getOrGenerateArticle";
-import StyleSwitcher from "@/components/mysteries/StyleSwitcher";
+import ReaderModes from "@/components/mysteries/ReaderModes";
 
 export default async function MysteryArticlePage(props: any) {
     try {
@@ -34,29 +34,17 @@ export default async function MysteryArticlePage(props: any) {
 
                     <div className="mt-3 text-sm text-muted-foreground">{article.readingMinutes} min read</div>
 
-                    <div className="mt-6 rounded-2xl border bg-muted/10 p-4">
-                        <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-                            <div className="text-xs text-muted-foreground">
-                                Style: <span className="text-foreground">{article.meta?.style ?? style}</span>
-                                {"  "}• Model: <span className="text-foreground">{article.meta?.model ?? "unknown"}</span>
-                            </div>
-                            <StyleSwitcher id={id} active={style} />
-                        </div>
+                    {/* Optional hero placeholder */}
+                    <div className="mt-8 rounded-3xl border bg-muted/30 p-6">
+                        <div className="text-xs text-muted-foreground">Hero image idea</div>
+                        <div className="mt-1 text-sm">{article.hero?.alt}</div>
+                        <div className="mt-2 text-xs text-muted-foreground">Query: {article.hero?.unsplashQuery}</div>
                     </div>
 
-                    <article className="mt-10 space-y-10">
-                        {article.sections.map((s) => (
-                            <section key={s.heading} className="space-y-3">
-                                <h2 className="text-xl md:text-2xl font-semibold">{s.heading}</h2>
-                                <div className="space-y-4 text-muted-foreground leading-relaxed">
-                                    {s.paragraphs.map((p: string, i: number) => (
-                                        <p key={i}>{p}</p>
-                                    ))}
-                                </div>
-                            </section>
-                        ))}
-                    </article>
+                    {/* ✅ Reader modes */}
+                    <ReaderModes article={article} />
 
+                    {/* Keep takeaways + sources below (or move into Deep if you prefer) */}
                     {article.keyTakeaways?.length ? (
                         <div className="mt-12 space-y-3">
                             <h3 className="text-lg font-semibold">Key takeaways</h3>
@@ -74,7 +62,12 @@ export default async function MysteryArticlePage(props: any) {
                             <ul className="space-y-2 text-sm">
                                 {article.sources.map((s: any) => (
                                     <li key={s.url}>
-                                        <a className="underline text-muted-foreground hover:text-foreground" href={s.url} target="_blank" rel="noreferrer">
+                                        <a
+                                            className="underline text-muted-foreground hover:text-foreground"
+                                            href={s.url}
+                                            target="_blank"
+                                            rel="noreferrer"
+                                        >
                                             {s.label}
                                         </a>
                                     </li>

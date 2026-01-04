@@ -3,7 +3,7 @@ import { redis } from "@/lib/redis";
 import { ArticleSchema, type Article } from "@/lib/articleSchema";
 import { TOPICS } from "@/lib/mysteryTopics";
 
-const CACHE_VERSION = "v1";
+const CACHE_VERSION = "v2";
 const groq = new OpenAI({
     apiKey: process.env.GROQ_API_KEY!,
     baseURL: "https://api.groq.com/openai/v1", // OpenAI-compatible Groq endpoint :contentReference[oaicite:11]{index=11}
@@ -102,7 +102,17 @@ Return JSON with this shape:
   "subtitle": string,
   "readingMinutes": number,
   "hero": { "unsplashQuery": string, "alt": string },
+  "quick": {
+    "tldr": string,
+    "keyPoints": string[],
+    "whatWouldChangeOurMind": string[]
+  },
   "sections": [ { "heading": string, "paragraphs": string[] } ],
+  "learn": {
+    "prerequisites": [ { "term": string, "explanation": string } ],
+    "learningPath": [ { "level": "Beginner"|"Intermediate"|"Advanced", "title": string, "url": string } ],
+    "practiceQuestions": [ { "question": string, "answer": string } ]
+  },
   "keyTakeaways": string[],
   "sources": [ { "label": string, "url": string } ]
 }
@@ -113,6 +123,11 @@ Constraints:
 - paragraphs array must never be empty.
 - Sources must be real-looking reputable orgs/journals (NASA/ESA, Nature/Science, university pages, etc.)
 - Output MUST be valid JSON.
+- quick.keyPoints: 3–8 items
+- quick.whatWouldChangeOurMind: 2–6 items
+- learn.prerequisites: 3–10 items
+- learn.learningPath: 3–12 items (use reputable sources; URLs must look real)
+- learn.practiceQuestions: 3–8 items
 `.trim();
 
 
@@ -181,6 +196,45 @@ Constraints:
             style,
             cacheVersion: CACHE_VERSION,
         },
+        quick: {
+            tldr: String(obj?.quick?.tldr ?? ""),
+            keyPoints: Array.isArray(obj?.quick?.keyPoints)
+                ? obj.quick.keyPoints.map((x: any) => String(x ?? "").trim()).filter(Boolean)
+                : [],
+            whatWouldChangeOurMind: Array.isArray(obj?.quick?.whatWouldChangeOurMind)
+                ? obj.quick.whatWouldChangeOurMind.map((x: any) => String(x ?? "").trim()).filter(Boolean)
+                : [],
+        },
+        learn: {
+            prerequisites: Array.isArray(obj?.learn?.prerequisites)
+                ? obj.learn.prerequisites
+                    .map((p: any) => ({
+                        term: String(p?.term ?? "").trim(),
+                        explanation: String(p?.explanation ?? "").trim(),
+                    }))
+                    .filter((p: any) => p.term && p.explanation)
+                : [],
+            learningPath: Array.isArray(obj?.learn?.learningPath)
+                ? obj.learn.learningPath
+                    .map((l: any) => ({
+                        level: (l?.level === "Beginner" || l?.level === "Intermediate" || l?.level === "Advanced")
+                            ? l.level
+                            : "Beginner",
+                        title: String(l?.title ?? "").trim(),
+                        url: String(l?.url ?? "").trim(),
+                    }))
+                    .filter((l: any) => l.title && l.url)
+                : [],
+            practiceQuestions: Array.isArray(obj?.learn?.practiceQuestions)
+                ? obj.learn.practiceQuestions
+                    .map((qa: any) => ({
+                        question: String(qa?.question ?? "").trim(),
+                        answer: String(qa?.answer ?? "").trim(),
+                    }))
+                    .filter((qa: any) => qa.question && qa.answer)
+                : [],
+        },
+
     };
 
     const article = ArticleSchema.parse(merged);
