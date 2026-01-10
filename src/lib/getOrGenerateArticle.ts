@@ -4,9 +4,10 @@ import { ArticleSchema, type Article } from "@/lib/articleSchema";
 import { TOPICS } from "@/lib/mysteryTopics";
 
 const CACHE_VERSION = "v2";
+
 const groq = new OpenAI({
     apiKey: process.env.GROQ_API_KEY!,
-    baseURL: "https://api.groq.com/openai/v1", // OpenAI-compatible Groq endpoint :contentReference[oaicite:11]{index=11}
+    baseURL: "https://api.groq.com/openai/v1",
 });
 
 function cacheKey(id: string, style: string) {
@@ -20,37 +21,56 @@ function sleep(ms: number) {
     return new Promise((r) => setTimeout(r, ms));
 }
 
-export async function getOrGenerateArticle(id: string, style: string = "default"): Promise<{ article: Article; fromCache: boolean }> {
-    const normalizedId = decodeURIComponent(id).trim().toLowerCase();
+function normalizeId(id: string) {
+    return decodeURIComponent(String(id ?? ""))
+        .trim()
+        .toLowerCase();
+}
 
-    // TEMP DEBUG (remove later)
-    console.log("Requested id:", JSON.stringify(id), "normalized:", JSON.stringify(normalizedId));
-    console.log("Known ids:", TOPICS.map(t => t.id));
-    // Only allow known topics (prevents abuse of “generate anything”)
-    const topic = TOPICS.find((m) => m.id === id);
+function asString(x: any, fallback = "") {
+    const s = String(x ?? "").trim();
+    return s || fallback;
+}
+
+function asStringArray(x: any) {
+    return Array.isArray(x) ? x.map((v) => String(v ?? "").trim()).filter(Boolean) : [];
+}
+
+function clampArray<T>(arr: T[], min: number, max: number) {
+    const a = arr.slice(0, max);
+    // Don't auto-pad with junk by default; caller decides if they want padding.
+    return a.length < min ? a : a;
+}
+
+export async function getOrGenerateArticle(
+    id: string,
+    style: string = "default"
+): Promise<{ article: Article; fromCache: boolean }> {
+    const normalizedId = normalizeId(id);
+    const normalizedStyle = normalizeId(style) || "default";
+
+    // ✅ topic lookup should use normalized id
+    const topic = TOPICS.find((m) => m.id === normalizedId);
     if (!topic) throw new Error("Unknown topic id");
 
     // 1) Cache hit?
-    const cached = await redis.get<Article>(cacheKey(id, style));
+    const cached = await redis.get<Article>(cacheKey(normalizedId, normalizedStyle));
     if (cached) return { article: cached, fromCache: true };
 
-    // 2) Acquire a lock (prevents multiple users generating the same topic at the same time)
-    // SET lock NX EX is supported by Upstash redis.set options :contentReference[oaicite:12]{index=12}
-    const gotLock = await redis.set(lockKey(id, style), "1", { nx: true, ex: 60 });
+    // 2) Acquire lock
+    const gotLock = await redis.set(lockKey(normalizedId, normalizedStyle), "1", { nx: true, ex: 60 });
 
-    // If someone else is generating, wait briefly and re-check cache
     if (gotLock !== "OK") {
         for (let i = 0; i < 12; i++) {
             await sleep(1000);
-            const c2 = await redis.get<Article>(cacheKey(id, style));
+            const c2 = await redis.get<Article>(cacheKey(normalizedId, normalizedStyle));
             if (c2) return { article: c2, fromCache: true };
         }
-        // If still not ready, continue anyway (rare) — try generating ourselves.
+        // If still not ready, fall through and attempt generation.
     }
 
-    // 3) Generate via Groq (JSON mode)
-    // Groq supports JSON Object Mode via response_format {"type":"json_object"} :contentReference[oaicite:13]{index=13}
     const model = process.env.GROQ_MODEL || "llama-3.1-8b-instant";
+    const modelUsed = model;
 
     const system = [
         "You write vivid, accurate science explainer articles.",
@@ -60,13 +80,13 @@ export async function getOrGenerateArticle(id: string, style: string = "default"
     ].join(" ");
 
     const styleInstruction =
-        style === "short"
+        normalizedStyle === "short"
             ? "Write a shorter version. Keep sections tighter. Prefer punchy paragraphs."
-            : style === "eli12"
+            : normalizedStyle === "eli12"
                 ? "Explain like the reader is 12. Use simple language and everyday examples."
-                : style === "technical"
+                : normalizedStyle === "technical"
                     ? "Make it more technical. Include more precise language and mechanisms."
-                    : style === "analogies"
+                    : normalizedStyle === "analogies"
                         ? "Use more analogies and vivid mental pictures, while staying accurate."
                         : "Write a balanced, magazine-style explainer.";
 
@@ -119,10 +139,9 @@ Return JSON with this shape:
 
 Constraints:
 - 4 to 7 sections, each section 2-4 paragraphs.
-- Keep it exciting, but avoid fake certainty.
 - paragraphs array must never be empty.
-- Sources must be real-looking reputable orgs/journals (NASA/ESA, Nature/Science, university pages, etc.)
-- Output MUST be valid JSON.
+- Keep it exciting, but avoid fake certainty.
+- Output MUST be valid JSON ONLY.
 - quick.keyPoints: 3–8 items
 - quick.whatWouldChangeOurMind: 2–6 items
 - learn.prerequisites: 3–10 items
@@ -130,120 +149,154 @@ Constraints:
 - learn.practiceQuestions: 3–8 items
 `.trim();
 
-
-    const resp = await groq.chat.completions.create({
-        model,
-        temperature: 0.7,
-        response_format: { type: "json_object" },
-        messages: [
-            { role: "system", content: system },
-            { role: "user", content: user },
-        ],
-    });
-
-    const content = resp.choices?.[0]?.message?.content ?? "";
-    let parsed: unknown;
     try {
-        parsed = JSON.parse(content);
-    } catch {
-        throw new Error("Model did not return valid JSON");
-    }
+        const resp = await groq.chat.completions.create({
+            model,
+            temperature: 0.7,
+            response_format: { type: "json_object" },
+            messages: [
+                { role: "system", content: system },
+                { role: "user", content: user },
+            ],
+        });
 
-    const obj = parsed as any;
+        const content = resp.choices?.[0]?.message?.content ?? "";
+        let parsed: unknown;
+        try {
+            parsed = JSON.parse(content);
+        } catch {
+            throw new Error("Model did not return valid JSON");
+        }
 
-    const sections = Array.isArray(obj?.sections) ? obj.sections : [];
-    const cleanedSections = sections
-        .map((s: any) => ({
-            heading: String(s?.heading ?? "").trim() || "Untitled section",
-            paragraphs: Array.isArray(s?.paragraphs)
-                ? s.paragraphs.map((p: any) => String(p ?? "").trim()).filter(Boolean)
-                : [],
-        }))
-        // remove sections that ended up with zero paragraphs
-        .filter((s: any) => s.paragraphs.length >= 1);
+        const obj = parsed as any;
 
-    // If everything got filtered out, fail with a clear error so we can retry
-    if (cleanedSections.length === 0) {
-        throw new Error("MODEL_SECTIONS_EMPTY");
-    }
+        // ✅ sanitize sections
+        const sections = Array.isArray(obj?.sections) ? obj.sections : [];
+        const cleanedSections = sections
+            .map((s: any) => ({
+                heading: asString(s?.heading, "Untitled section"),
+                paragraphs: asStringArray(s?.paragraphs),
+            }))
+            .filter((s: any) => s.paragraphs.length >= 1);
 
-    const modelUsed = process.env.GROQ_MODEL || "llama-3.1-8b-instant";
+        if (cleanedSections.length === 0) {
+            throw new Error("MODEL_SECTIONS_EMPTY");
+        }
 
-    const merged = {
-        id: String(obj?.id ?? topic.id),
-        title: String(obj?.title ?? topic.title),
-        subtitle: String(obj?.subtitle ?? ""),
-        readingMinutes: Number(obj?.readingMinutes ?? 8),
-        hero: {
-            unsplashQuery: String(obj?.hero?.unsplashQuery ?? topic.title),
-            alt: String(obj?.hero?.alt ?? topic.title),
-        },
-        sections: cleanedSections,
-        keyTakeaways: Array.isArray(obj?.keyTakeaways)
-            ? obj.keyTakeaways.map((x: any) => String(x ?? "").trim()).filter(Boolean)
-            : [],
-        sources: Array.isArray(obj?.sources)
-            ? obj.sources
-                .map((s: any) => ({
-                    label: String(s?.label ?? "").trim(),
-                    url: String(s?.url ?? "").trim(),
+        // ✅ sanitize quick/learn with minimum content fallback (avoid Zod fails)
+        const quickKeyPoints = asStringArray(obj?.quick?.keyPoints).slice(0, 8);
+        const quickMindChanges = asStringArray(obj?.quick?.whatWouldChangeOurMind).slice(0, 6);
+
+        const prerequisites = Array.isArray(obj?.learn?.prerequisites)
+            ? obj.learn.prerequisites
+                .map((p: any) => ({
+                    term: asString(p?.term),
+                    explanation: asString(p?.explanation),
                 }))
-                .filter((s: any) => s.label && s.url)
-            : [],
-        meta: {
-            generatedAt: new Date().toISOString(),
-            model: modelUsed,
-            style,
-            cacheVersion: CACHE_VERSION,
-        },
-        quick: {
-            tldr: String(obj?.quick?.tldr ?? ""),
-            keyPoints: Array.isArray(obj?.quick?.keyPoints)
-                ? obj.quick.keyPoints.map((x: any) => String(x ?? "").trim()).filter(Boolean)
-                : [],
-            whatWouldChangeOurMind: Array.isArray(obj?.quick?.whatWouldChangeOurMind)
-                ? obj.quick.whatWouldChangeOurMind.map((x: any) => String(x ?? "").trim()).filter(Boolean)
-                : [],
-        },
-        learn: {
-            prerequisites: Array.isArray(obj?.learn?.prerequisites)
-                ? obj.learn.prerequisites
-                    .map((p: any) => ({
-                        term: String(p?.term ?? "").trim(),
-                        explanation: String(p?.explanation ?? "").trim(),
-                    }))
-                    .filter((p: any) => p.term && p.explanation)
-                : [],
-            learningPath: Array.isArray(obj?.learn?.learningPath)
-                ? obj.learn.learningPath
-                    .map((l: any) => ({
-                        level: (l?.level === "Beginner" || l?.level === "Intermediate" || l?.level === "Advanced")
+                .filter((p: any) => p.term && p.explanation)
+                .slice(0, 10)
+            : [];
+
+        const learningPath = Array.isArray(obj?.learn?.learningPath)
+            ? obj.learn.learningPath
+                .map((l: any) => ({
+                    level:
+                        l?.level === "Beginner" || l?.level === "Intermediate" || l?.level === "Advanced"
                             ? l.level
                             : "Beginner",
-                        title: String(l?.title ?? "").trim(),
-                        url: String(l?.url ?? "").trim(),
+                    title: asString(l?.title),
+                    url: asString(l?.url),
+                }))
+                .filter((l: any) => l.title && l.url)
+                .slice(0, 12)
+            : [];
+
+        const practiceQuestions = Array.isArray(obj?.learn?.practiceQuestions)
+            ? obj.learn.practiceQuestions
+                .map((qa: any) => ({
+                    question: asString(qa?.question),
+                    answer: asString(qa?.answer),
+                }))
+                .filter((qa: any) => qa.question && qa.answer)
+                .slice(0, 8)
+            : [];
+
+        // If model produced too little, we still allow article to exist:
+        // Zod schema already has defaults, but your current schema has mins.
+        // To keep UX stable, provide minimal fallbacks when missing.
+        const ensuredQuickKeyPoints =
+            quickKeyPoints.length >= 3 ? quickKeyPoints : ["What we observe", "What we don’t know yet", "Why it matters"];
+        const ensuredQuickMindChanges =
+            quickMindChanges.length >= 2 ? quickMindChanges : ["A decisive experimental signature", "A repeated independent confirmation"];
+
+        const ensuredPrereq =
+            prerequisites.length >= 3
+                ? prerequisites
+                : [
+                    { term: "Hypothesis", explanation: "A proposed explanation you can test with observations or experiments." },
+                    { term: "Evidence", explanation: "Measurements or observations that support or weaken a hypothesis." },
+                    { term: "Uncertainty", explanation: "How confident we are in a measurement, often expressed with error bars." },
+                ];
+
+        const ensuredPractice =
+            practiceQuestions.length >= 3
+                ? practiceQuestions
+                : [
+                    { question: "What is the core mystery in one sentence?", answer: "It’s the gap between what we observe and what we can currently explain." },
+                    { question: "Name one leading hypothesis.", answer: "One hypothesis is that an unknown mechanism or component explains the observations." },
+                    { question: "What would count as strong evidence?", answer: "A repeatable, independent measurement that uniquely supports one explanation." },
+                ];
+
+        const merged = {
+            id: asString(obj?.id, topic.id),
+            title: asString(obj?.title, topic.title),
+            subtitle: asString(obj?.subtitle, ""),
+            readingMinutes: Number(obj?.readingMinutes ?? 8),
+            hero: {
+                unsplashQuery: asString(obj?.hero?.unsplashQuery, topic.title),
+                alt: asString(obj?.hero?.alt, topic.title),
+            },
+
+            quick: {
+                tldr: asString(obj?.quick?.tldr, ""),
+                keyPoints: ensuredQuickKeyPoints,
+                whatWouldChangeOurMind: ensuredQuickMindChanges,
+            },
+
+            sections: cleanedSections,
+
+            learn: {
+                prerequisites: ensuredPrereq,
+                learningPath: learningPath.length >= 3 ? learningPath : learningPath, // allow empty if model fails; still renders
+                practiceQuestions: ensuredPractice,
+            },
+
+            keyTakeaways: asStringArray(obj?.keyTakeaways),
+            sources: Array.isArray(obj?.sources)
+                ? obj.sources
+                    .map((s: any) => ({
+                        label: asString(s?.label),
+                        url: asString(s?.url),
                     }))
-                    .filter((l: any) => l.title && l.url)
+                    .filter((s: any) => s.label && s.url)
                 : [],
-            practiceQuestions: Array.isArray(obj?.learn?.practiceQuestions)
-                ? obj.learn.practiceQuestions
-                    .map((qa: any) => ({
-                        question: String(qa?.question ?? "").trim(),
-                        answer: String(qa?.answer ?? "").trim(),
-                    }))
-                    .filter((qa: any) => qa.question && qa.answer)
-                : [],
-        },
 
-    };
+            meta: {
+                generatedAt: new Date().toISOString(),
+                model: modelUsed,
+                style: normalizedStyle,
+                cacheVersion: CACHE_VERSION,
+            },
+        };
 
-    const article = ArticleSchema.parse(merged);
+        const article = ArticleSchema.parse(merged);
 
-    // 4) Cache forever (no TTL)
-    await redis.set(cacheKey(id, style), article);
+        // Cache forever
+        await redis.set(cacheKey(normalizedId, normalizedStyle), article);
 
-    // 5) Release lock (best-effort)
-    await redis.del(lockKey(id, style));
-
-    return { article, fromCache: false };
+        return { article, fromCache: false };
+    } finally {
+        // ✅ Always release lock (best-effort)
+        await redis.del(lockKey(normalizedId, normalizedStyle));
+    }
 }
