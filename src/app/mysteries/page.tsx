@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useMemo, useState } from "react";
+import { useMemo, useState, Suspense } from "react";
 import { Search } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
@@ -12,10 +12,16 @@ import CoverArt from "@/components/mysteries/CoverArt";
 import LatestAI from "@/components/mysteries/LatestAI";
 import HowItWorks from "@/components/mysteries/HowItWorks";
 import { CATEGORY_META, TOPICS } from "@/lib/mysteryTopics";
+import { useSearchParams } from "next/navigation";
 
-export default function MysteriesIndexPage() {
+// Force dynamic rendering to support useSearchParams and client-side state
+export const dynamic = 'force-dynamic';
+
+function MysteriesContent() {
     const [q, setQ] = useState("");
-    const [cat, setCat] = useState<string>("all");
+    const searchParams = useSearchParams();
+    const initialCat = searchParams.get("cat") || "all";
+    const [cat, setCat] = useState<string>(initialCat);
 
     const filtered = useMemo(() => {
         const query = q.trim().toLowerCase();
@@ -39,9 +45,9 @@ export default function MysteriesIndexPage() {
                 <div className="rounded-3xl border bg-gradient-to-br from-slate-900/30 via-background to-slate-900/20 p-6 md:p-10">
                     <div className="flex items-start justify-between gap-4">
                         <div>
-                            <div className="text-sm text-muted-foreground">Mysteries of Science</div>
+                            <div className="text-sm text-muted-foreground">Explore</div>
                             <h1 className="mt-2 text-3xl md:text-5xl font-semibold tracking-tight">
-                                Questions we still can’t answer
+                                Explore topics at the edge
                             </h1>
                             <p className="mt-3 max-w-2xl text-muted-foreground">
                                 Click a topic. The first visitor triggers AI generation; everyone else reads the cached article.
@@ -212,5 +218,17 @@ export default function MysteriesIndexPage() {
                 </div>
             </div>
         </div>
+    );
+}
+
+export default function MysteriesIndexPage() {
+    return (
+        <Suspense fallback={
+            <div className="min-h-screen flex items-center justify-center">
+                <div className="text-muted-foreground">Loading...</div>
+            </div>
+        }>
+            <MysteriesContent />
+        </Suspense>
     );
 }
