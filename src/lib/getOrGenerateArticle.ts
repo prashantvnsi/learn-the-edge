@@ -2,8 +2,11 @@ import OpenAI from "openai";
 import { redis } from "@/lib/redis";
 import { ArticleSchema, type Article } from "@/lib/articleSchema";
 import { TOPICS } from "@/lib/mysteryTopics";
+import { evaluateArticleQuality } from "@/lib/quality";
+import { repairWithGroq } from "@/lib/repairArticle";
 
-const CACHE_VERSION = "v2";
+
+const CACHE_VERSION = "v3";
 
 const groq = new OpenAI({
     apiKey: process.env.GROQ_API_KEY!,
@@ -290,11 +293,109 @@ Constraints:
         };
 
         const article = ArticleSchema.parse(merged);
+        const articleDraft = ArticleSchema.parse(merged);
 
-        // Cache forever
-        await redis.set(cacheKey(normalizedId, normalizedStyle), article);
+        // ✅ Quality pass
+        let quality = evaluateArticleQuality(articleDraft);
+        let finalArticle = { ...articleDraft, quality };
 
-        return { article, fromCache: false };
+        // ✅ Repair pass if needed
+        if (!quality.passed) {
+            const topicSummary = [
+                `id: ${topic.id}`,
+                `title: ${topic.title}`,
+                `hook: ${topic.hook}`,
+                `category: ${topic.category}`,
+                `difficulty: ${topic.difficulty ?? 3}`,
+            ].join("\n");
+
+            const repaired = await repairWithGroq({
+                groq,
+                model: modelUsed,
+                topicSummary,
+                styleInstruction,
+                badJson: merged,
+                issues: quality.issues,
+            });
+
+            // sanitize/merge again like you already do
+            const obj2 = repaired as any;
+
+            const sections2 = Array.isArray(obj2?.sections) ? obj2.sections : [];
+            const cleanedSections2 = sections2
+                .map((s: any) => ({
+                    heading: String(s?.heading ?? "").trim() || "Untitled section",
+                    paragraphs: Array.isArray(s?.paragraphs)
+                        ? s.paragraphs.map((p: any) => String(p ?? "").trim()).filter(Boolean)
+                        : [],
+                }))
+                .filter((s: any) => s.paragraphs.length >= 1);
+
+            const merged2 = {
+                ...finalArticle,
+                id: String(obj2?.id ?? topic.id),
+                title: String(obj2?.title ?? topic.title),
+                subtitle: String(obj2?.subtitle ?? ""),
+                readingMinutes: Number(obj2?.readingMinutes ?? finalArticle.readingMinutes),
+                hero: {
+                    unsplashQuery: String(obj2?.hero?.unsplashQuery ?? finalArticle.hero.unsplashQuery),
+                    alt: String(obj2?.hero?.alt ?? finalArticle.hero.alt),
+                },
+                quick: {
+                    tldr: String(obj2?.quick?.tldr ?? finalArticle.quick.tldr),
+                    keyPoints: Array.isArray(obj2?.quick?.keyPoints)
+                        ? obj2.quick.keyPoints.map((x: any) => String(x ?? "").trim()).filter(Boolean)
+                        : finalArticle.quick.keyPoints,
+                    whatWouldChangeOurMind: Array.isArray(obj2?.quick?.whatWouldChangeOurMind)
+                        ? obj2.quick.whatWouldChangeOurMind.map((x: any) => String(x ?? "").trim()).filter(Boolean)
+                        : finalArticle.quick.whatWouldChangeOurMind,
+                },
+                sections: cleanedSections2.length ? cleanedSections2 : finalArticle.sections,
+                learn: {
+                    prerequisites: Array.isArray(obj2?.learn?.prerequisites)
+                        ? obj2.learn.prerequisites
+                            .map((p: any) => ({ term: String(p?.term ?? "").trim(), explanation: String(p?.explanation ?? "").trim() }))
+                            .filter((p: any) => p.term && p.explanation)
+                        : finalArticle.learn.prerequisites,
+                    learningPath: Array.isArray(obj2?.learn?.learningPath)
+                        ? obj2.learn.learningPath
+                            .map((l: any) => ({
+                                level: (l?.level === "Beginner" || l?.level === "Intermediate" || l?.level === "Advanced")
+                                    ? l.level
+                                    : "Beginner",
+                                title: String(l?.title ?? "").trim(),
+                                url: String(l?.url ?? "").trim(),
+                            }))
+                            .filter((l: any) => l.title && l.url)
+                        : finalArticle.learn.learningPath,
+                    practiceQuestions: Array.isArray(obj2?.learn?.practiceQuestions)
+                        ? obj2.learn.practiceQuestions
+                            .map((qa: any) => ({ question: String(qa?.question ?? "").trim(), answer: String(qa?.answer ?? "").trim() }))
+                            .filter((qa: any) => qa.question && qa.answer)
+                        : finalArticle.learn.practiceQuestions,
+                },
+                keyTakeaways: Array.isArray(obj2?.keyTakeaways)
+                    ? obj2.keyTakeaways.map((x: any) => String(x ?? "").trim()).filter(Boolean)
+                    : finalArticle.keyTakeaways,
+                sources: Array.isArray(obj2?.sources)
+                    ? obj2.sources
+                        .map((s: any) => ({ label: String(s?.label ?? "").trim(), url: String(s?.url ?? "").trim() }))
+                        .filter((s: any) => s.label && s.url)
+                    : finalArticle.sources,
+            };
+
+            const repairedArticle = ArticleSchema.parse(merged2);
+            const quality2 = evaluateArticleQuality(repairedArticle);
+
+            finalArticle = { ...repairedArticle, quality: quality2 };
+        }
+
+        // cache the final (quality included)
+        await redis.set(cacheKey(id, style), finalArticle);
+        await redis.del(lockKey(id, style));
+
+        return { article: finalArticle, fromCache: false };
+
     } finally {
         // ✅ Always release lock (best-effort)
         await redis.del(lockKey(normalizedId, normalizedStyle));
